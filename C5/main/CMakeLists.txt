@@ -17,6 +17,5 @@ idf_component_register(SRCS "main.cpp"
                              nvs_flash esp_driver_ledc esp_http_server lwip
                              esp_lcd
                              lvgl
-                             esp_phy
                              esp_driver_usb_serial_jtag
                              LovyanGFX)

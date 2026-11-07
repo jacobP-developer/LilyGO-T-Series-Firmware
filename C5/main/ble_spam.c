@@ -14,10 +14,6 @@
 
 static const char *TAG = "ble_spam";
 
-// NimBLE broadcaster + default buffer counts need roughly this much
-// contiguous DMA-capable internal RAM. The C5 has 384 KB internal RAM
-// (vs 512 KB on S3), so lower the threshold to avoid false precheck
-// failures after Wi-Fi has fragmented the heap.
 #define BLE_MIN_CONTIGUOUS_BYTES  (16 * 1024)
 
 // ---------------------------------------------------------------------------
@@ -344,6 +340,25 @@ esp_err_t ble_spam_stop(void)
         vTaskDelay(pdMS_TO_TICKS(50));
     }
     ble_gap_adv_stop();
+    return ESP_OK;
+}
+
+esp_err_t ble_spam_release_radio(void)
+{
+    if (s_nimble_state != NB_READY) return ESP_OK;
+
+    // Stop any running spam task first.
+    if (s_running) {
+        s_running = false;
+        for (int i = 0; i < 20 && s_task != NULL; i++) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+    }
+
+    nimble_port_stop();
+    nimble_port_deinit();
+    s_nimble_state = NB_UNINIT;
+    s_synced = false;
     return ESP_OK;
 }
 

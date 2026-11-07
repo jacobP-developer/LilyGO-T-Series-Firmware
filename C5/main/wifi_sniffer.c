@@ -1,6 +1,6 @@
 // main/wifi_sniffer.c
 #include "wifi_sniffer.h"
-#include "config.h"
+#include "usb_protocol.h"
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_log.h"
@@ -14,21 +14,14 @@ static bool initialized = false;
 static esp_netif_t *sta_netif = NULL;
 static esp_timer_handle_t hop_timer = NULL;
 
-// 2.4 GHz: all channels. 5 GHz: UNII-1 + UNII-3 (skip DFS).
-static const uint8_t hop_channels[] = {
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-    36, 40, 44, 48,
-    149, 153, 157, 161, 165,
-};
+static const uint8_t hop_channels[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 };
 #define HOP_COUNT (sizeof(hop_channels) / sizeof(hop_channels[0]))
 static uint8_t hop_idx = 0;
 
-// ---- scan tables ----
 #define SCAN_MAX_APS          64
 #define SCAN_MAX_CLIENTS      128
 #define SCAN_SSID_MAX         32
 
-// Security bits
 #define SEC_OPEN      (1u << 0)
 #define SEC_WEP       (1u << 1)
 #define SEC_WPA       (1u << 2)
@@ -59,6 +52,8 @@ typedef struct {
     uint16_t beacon_count;
     uint8_t  flags;
     uint8_t  used;
+    int8_t   emitted_rssi;
+    uint32_t emitted_ms;
 } scan_ap_t;
 
 typedef struct {
@@ -72,17 +67,15 @@ typedef struct {
     uint16_t frames;
     uint8_t  flags;
     uint8_t  used;
+    int8_t   emitted_rssi;
+    uint32_t emitted_ms;
 } scan_client_t;
 
 static scan_ap_t     s_aps[SCAN_MAX_APS];
 static scan_client_t s_clients[SCAN_MAX_CLIENTS];
 
-static uint32_t now_ms(void)
-{
-    return (uint32_t)(esp_timer_get_time() / 1000);
-}
+static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
-// ---- IE parsing ----
 static const uint8_t *find_ie(const uint8_t *ies, size_t len, uint8_t id,
                               size_t *out_len)
 {
@@ -155,8 +148,7 @@ static bool find_wpa_ie(const uint8_t *ies, size_t len)
         if (i + 2 + ie_len > len) return false;
         if (ie_id == 221 && ie_len >= 4) {
             const uint8_t *v = &ies[i + 2];
-            if (v[0]==0x00 && v[1]==0x50 && v[2]==0xF2 && v[3]==0x01)
-                return true;
+            if (v[0]==0x00 && v[1]==0x50 && v[2]==0xF2 && v[3]==0x01) return true;
         }
         i += 2 + ie_len;
     }
@@ -171,8 +163,7 @@ static bool find_wps_ie(const uint8_t *ies, size_t len)
         if (i + 2 + ie_len > len) return false;
         if (ie_id == 221 && ie_len >= 4) {
             const uint8_t *v = &ies[i + 2];
-            if (v[0]==0x00 && v[1]==0x50 && v[2]==0xF2 && v[3]==0x04)
-                return true;
+            if (v[0]==0x00 && v[1]==0x50 && v[2]==0xF2 && v[3]==0x04) return true;
         }
         i += 2 + ie_len;
     }
@@ -191,7 +182,6 @@ static uint16_t classify_security(const uint8_t *ies, size_t len)
     return sec;
 }
 
-// ---- table management ----
 static scan_ap_t *find_ap(const uint8_t *bssid)
 {
     for (int i = 0; i < SCAN_MAX_APS; i++) {
@@ -236,7 +226,36 @@ static scan_client_t *alloc_client(void)
     return oldest;
 }
 
-// ---- frame handlers ----
+static void emit_ap(const scan_ap_t *ap)
+{
+    uint8_t buf[64];
+    size_t p = 0;
+    memcpy(&buf[p], ap->bssid, 6);                 p += 6;
+    buf[p++] = ap->ssid_len;
+    memcpy(&buf[p], ap->ssid, ap->ssid_len);       p += ap->ssid_len;
+    buf[p++] = ap->channel;
+    buf[p++] = (uint8_t)ap->rssi_last;
+    buf[p++] = (uint8_t)ap->rssi_max;
+    buf[p++] = ap->security & 0xFF;
+    buf[p++] = (ap->security >> 8) & 0xFF;
+    buf[p++] = ap->flags;
+    usb_send_typed_packet(USB_TYPE_SCAN_AP, buf, p);
+}
+
+static void emit_client(const scan_client_t *cl)
+{
+    uint8_t buf[64];
+    size_t p = 0;
+    memcpy(&buf[p], cl->mac, 6);                   p += 6;
+    memcpy(&buf[p], cl->bssid, 6);                 p += 6;
+    buf[p++] = cl->probed_ssid_len;
+    memcpy(&buf[p], cl->probed_ssid, cl->probed_ssid_len);
+    p += cl->probed_ssid_len;
+    buf[p++] = (uint8_t)cl->rssi;
+    buf[p++] = cl->flags;
+    usb_send_typed_packet(USB_TYPE_SCAN_CLIENT, buf, p);
+}
+
 static void handle_beacon(const uint8_t *frame, size_t len,
                           int8_t rssi, uint8_t channel)
 {
@@ -249,6 +268,7 @@ static void handle_beacon(const uint8_t *frame, size_t len,
 
     uint32_t t = now_ms();
     scan_ap_t *ap = find_ap(bssid);
+    bool is_new = false;
     if (!ap) {
         ap = alloc_ap();
         memset(ap, 0, sizeof(*ap));
@@ -257,6 +277,7 @@ static void handle_beacon(const uint8_t *frame, size_t len,
         ap->rssi_min = rssi;
         ap->rssi_max = rssi;
         ap->used = true;
+        is_new = true;
     }
 
     ap->channel = channel;
@@ -284,6 +305,18 @@ static void handle_beacon(const uint8_t *frame, size_t len,
     }
 
     ap->security = classify_security(ies, ies_len);
+
+    bool should_emit = is_new;
+    if (!should_emit) {
+        int delta = rssi - ap->emitted_rssi;
+        if (delta < 0) delta = -delta;
+        if (delta >= 8 || (t - ap->emitted_ms) >= 5000) should_emit = true;
+    }
+    if (should_emit) {
+        emit_ap(ap);
+        ap->emitted_rssi = rssi;
+        ap->emitted_ms = t;
+    }
 }
 
 static void handle_probe_request(const uint8_t *frame, size_t len,
@@ -303,6 +336,7 @@ static void handle_probe_request(const uint8_t *frame, size_t len,
 
     uint32_t t = now_ms();
     scan_client_t *cl = find_client(client_mac);
+    bool is_new = false;
     if (!cl) {
         cl = alloc_client();
         memset(cl, 0, sizeof(*cl));
@@ -310,6 +344,7 @@ static void handle_probe_request(const uint8_t *frame, size_t len,
         memset(cl->bssid, 0xFF, 6);
         cl->first_seen_ms = t;
         cl->used = true;
+        is_new = true;
     }
     cl->last_seen_ms = t;
     cl->rssi = rssi;
@@ -319,6 +354,18 @@ static void handle_probe_request(const uint8_t *frame, size_t len,
         memcpy(cl->probed_ssid, ssid, ssid_len);
         cl->probed_ssid[ssid_len] = '\0';
         cl->probed_ssid_len = ssid_len;
+    }
+
+    bool should_emit = is_new;
+    if (!should_emit) {
+        int delta = rssi - cl->emitted_rssi;
+        if (delta < 0) delta = -delta;
+        if (delta >= 8 || (t - cl->emitted_ms) >= 5000) should_emit = true;
+    }
+    if (should_emit) {
+        emit_client(cl);
+        cl->emitted_rssi = rssi;
+        cl->emitted_ms = t;
     }
 }
 
@@ -345,9 +392,12 @@ static void handle_assoc_request(const uint8_t *frame, size_t len,
     cl->last_seen_ms = t;
     cl->rssi = rssi;
     cl->frames++;
+
+    emit_client(cl);
+    cl->emitted_rssi = rssi;
+    cl->emitted_ms = t;
 }
 
-// ---- promiscuous callback ----
 static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 {
     if (type != WIFI_PKT_MGMT) return;
@@ -363,19 +413,17 @@ static void wifi_sniffer_cb(void *buf, wifi_promiscuous_pkt_type_t type)
 
     switch (subtype) {
     case 8: handle_beacon(frame, len, rssi, channel); break;
-    case 5: handle_beacon(frame, len, rssi, channel); break;  // probe resp
+    case 5: handle_beacon(frame, len, rssi, channel); break;
     case 4: handle_probe_request(frame, len, rssi, channel); break;
     case 0: handle_assoc_request(frame, len, rssi, channel); break;
     }
 }
 
-// ---- timer / lifecycle ----
 static void channel_hop_cb(void *arg)
 {
     (void)arg;
     if (!sniffing) return;
     hop_idx = (hop_idx + 1) % HOP_COUNT;
-    // Some 5GHz channels may be rejected by country policy; ignore errors.
     esp_wifi_set_channel(hop_channels[hop_idx], WIFI_SECOND_CHAN_NONE);
 }
 
@@ -402,39 +450,45 @@ esp_err_t wifi_sniffer_init(void)
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t e = esp_wifi_init(&cfg);
-    if (e != ESP_OK) { if (sta_netif) { esp_netif_destroy_default_wifi(sta_netif); sta_netif = NULL; } return e; }
+    if (e != ESP_OK) {
+        if (sta_netif) { esp_netif_destroy_default_wifi(sta_netif); sta_netif = NULL; }
+        return e;
+    }
 
     e = esp_wifi_set_storage(WIFI_STORAGE_RAM);
-    if (e != ESP_OK) { esp_wifi_deinit(); if (sta_netif) { esp_netif_destroy_default_wifi(sta_netif); sta_netif = NULL; } return e; }
+    if (e != ESP_OK) goto fail;
 
     e = esp_wifi_set_mode(WIFI_MODE_NULL);
-    if (e != ESP_OK) { esp_wifi_deinit(); if (sta_netif) { esp_netif_destroy_default_wifi(sta_netif); sta_netif = NULL; } return e; }
+    if (e != ESP_OK) goto fail;
 
-    // C5 is dual-band; force AUTO so 5GHz channels are addressable.
-    // (Older IDF may not expose this symbol on non-5G chips; safe to ignore.)
-    esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+    // Band mode is set in wifi_sniffer_start() after esp_wifi_start().
+    // The driver rejects it before start (ESP_ERR_WIFI_NOT_STARTED).
 
     wifi_promiscuous_filter_t filter = {
         .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT
     };
     e = esp_wifi_set_promiscuous_filter(&filter);
-    if (e != ESP_OK) { esp_wifi_deinit(); if (sta_netif) { esp_netif_destroy_default_wifi(sta_netif); sta_netif = NULL; } return e; }
+    if (e != ESP_OK) goto fail;
 
     e = esp_wifi_set_promiscuous_rx_cb(wifi_sniffer_cb);
-    if (e != ESP_OK) { esp_wifi_deinit(); if (sta_netif) { esp_netif_destroy_default_wifi(sta_netif); sta_netif = NULL; } return e; }
+    if (e != ESP_OK) goto fail;
 
     if (hop_timer == NULL) {
-        esp_timer_create_args_t timer_args = {
-            .callback = channel_hop_cb,
-            .arg      = NULL,
-            .name     = "wifi_hop"
-        };
+        esp_timer_create_args_t timer_args = { 0 };
+        timer_args.callback = channel_hop_cb;
+        timer_args.arg      = NULL;
+        timer_args.name     = "wifi_hop";
         e = esp_timer_create(&timer_args, &hop_timer);
-        if (e != ESP_OK) { esp_wifi_deinit(); if (sta_netif) { esp_netif_destroy_default_wifi(sta_netif); sta_netif = NULL; } return e; }
+        if (e != ESP_OK) goto fail;
     }
 
     initialized = true;
     return ESP_OK;
+
+fail:
+    esp_wifi_deinit();
+    if (sta_netif) { esp_netif_destroy_default_wifi(sta_netif); sta_netif = NULL; }
+    return e;
 }
 
 esp_err_t wifi_sniffer_deinit(void)
@@ -476,6 +530,10 @@ void wifi_sniffer_start(void)
         ESP_LOGE(TAG, "esp_wifi_start: %s", esp_err_to_name(e));
         return;
     }
+
+    // Set band mode after start — the driver rejects it before start.
+    esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+
     e = esp_wifi_set_promiscuous(true);
     if (e != ESP_OK) {
         ESP_LOGE(TAG, "promiscuous on: %s", esp_err_to_name(e));
@@ -498,9 +556,8 @@ void wifi_sniffer_stop(void)
 
 void wifi_sniffer_set_channel(uint8_t channel)
 {
-    // Accept both 2.4 (1–14) and 5 GHz channels
-    if (channel < 1) return;
-    esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (channel < 1 || channel > 13) return;
+    if (sniffing) esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
 }
 
 void wifi_sniffer_get_stats(int *ap_count, int *client_count)

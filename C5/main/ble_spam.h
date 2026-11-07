@@ -21,10 +21,14 @@ esp_err_t ble_spam_start(ble_spam_type_t type);
 esp_err_t ble_spam_stop(void);
 bool      ble_spam_is_running(void);
 
-/* True once NimBLE has been brought up in this boot. Once true, the
- * Wi-Fi driver cannot be reinitialised without a reboot — the S3 has
- * no PSRAM and NimBLE's buffers fragment the internal DMA heap. The UI
- * uses this to refuse WiFi mode selections with a "REBOOT" message. */
+/* Stops NimBLE and deinitialises the Bluetooth stack. Call this before any
+ * dual-band Wi-Fi scan — 5 GHz scans fail with ESP_ERR_TIMEOUT when
+ * Bluetooth is running (IDFGH-15407 / esp-idf#16059). After this call,
+ * ble_spam_is_resident() returns false and ble_spam_start() will bring
+ * NimBLE back up from scratch. */
+esp_err_t ble_spam_release_radio(void);
+
+/* True once NimBLE has been brought up in this boot. */
 bool ble_spam_is_resident(void);
 
 /* Diagnostic:
@@ -32,8 +36,6 @@ bool ble_spam_is_resident(void);
  *           (257 = ESP_ERR_NO_MEM)
  *   -2    = host sync never completed
  *   -1001 = precheck failed: largest contiguous DMA block < threshold
- *           (happens when Wi-Fi was initialised earlier and fragmented
- *           the heap — reboot to recover)
  *   -1002 = NimBLE bring-up failed after precheck passed
  *   -1003 = xTaskCreate for spam task failed
  *   0     = no error recorded. */
