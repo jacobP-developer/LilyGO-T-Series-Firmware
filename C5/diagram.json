@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "author": "M4NT1S",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "board-esp32-s3-devkitc-1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-st7735", "id": "lcd", "top": 100, "left": 200, "attrs": {} },
+    { "type": "wokwi-pushbutton", "id": "btn1", "top": 0, "left": 300, "attrs": { "color": "green" } }
+  ],
+  "connections": [
+    [ "esp:5", "lcd:SCK", "green", [] ],
+    [ "esp:3", "lcd:SDA", "green", [] ],
+    [ "esp:4", "lcd:CS", "green", [] ],
+    [ "esp:2", "lcd:DC", "green", [] ],
+    [ "esp:1", "lcd:RESET", "green", [] ],
+    [ "esp:38", "lcd:LED", "green", [] ],
+    [ "esp:0", "btn1:1.l", "green", [] ],
+    [ "esp:GND.1", "btn1:2.l", "black", [] ]
+  ]
+}

@@ -1,0 +1,112 @@
+-ALWAYS RESPOND IN ENGLISH-
+-ALWAYS FACT CHECK ONLINE FOR ANYTHING YOU ARE UNSURE OF-
+
+M4NT1S is a solo hacker crew (handle: M4NT1S) building a portable wireless auditing lab. The project has two halves: a custom firmware running on a LilyGO T-Dongle-S3, and a rooted Android host running scripts that talk to it over USB serial. No Kali NetHunter, no pre-built frameworks. Every line of firmware is written from scratch in Rust.
+
+--- HARDWARE ---
+
+Dongle: LilyGO T-Dongle-S3
+- MCU: ESP32-S3 (Xtensa LX7 dual-core)
+- Memory: 16MB flash, 512KB SRAM, NO PSRAM
+- Display: 0.96" ST7735 SPI LCD, 80x160 native, 65k colour IPS
+- Wireless: Wi-Fi 802.11 b/g/n (2.4GHz only), Bluetooth 5 LE
+- Other: APA102 RGB LED, TF card slot, BOOT button (GPIO 0), USB Type-A plug
+- Form factor: USB stick
+
+Phone (lab node): Cubot KingKong Mini 4
+- Chipset: Unisoc T616 / UMS9230
+- Storage: UFS (important — eMMC exploit tools can brick it)
+- Root path: CVE-2022-38694 bootloader unlock, TomKing062 GitHub repo
+- Role: disposable lab machine, host-side processing, USB OTG host for the dongle
+- Small, rugged, always-plugged-in dedicated node — NOT a daily driver
+
+Daily driver (also rooted): Motorola Moto G56 5G
+- Used for testing rooted Android scripts before deploying to the Cubot
+- Termux + tsu for root shell, raw AF_PACKET sockets, camera/audio jamming experiments
+
+--- FIRMWARE STACK ---
+
+Language: Rust (100% custom, no pre-built frameworks)
+Target: xtensa-esp32s3-espidf
+Toolchain: esp-idf-hal, esp-idf-svc, esp-idf-sys, mipidsi, embedded-graphics, anyhow
+Cross-compile from: Windows (Xtensa Rust fork, ldproxy, espflash)
+Alternative path being explored: esp-hal (no_std) for lower-level radio control
+
+Display driver: mipidsi with ST7735s model
+- SPI2 at 26 MHz (may drop to 16 MHz if corruption)
+- Pins: SCK=GPIO5, MOSI=GPIO3, CS=GPIO4, DC=GPIO2, RST=GPIO1
+- Aesthetic: green-on-black DedSec terminal, scanline overlay, ASCII sigil
+- Menu system: ASCII/DedSec style, navigated by physical buttons or USB serial commands
+
+--- ARCHITECTURE ---
+
+The dongle is the SENSOR. The phone is the BRAIN.
+- Dongle captures packets (Wi-Fi promiscuous mode, BLE advertisement scans)
+- Dongle streams captured data over USB serial to the rooted phone
+- Phone runs host-side processing: parsing, filtering, saving to disk, display
+- Same architecture a real hardware implant uses
+
+Wire protocol: TBD (length-prefixed binary or JSON lines, must handle partial reads, backpressure, resync after dropped packets)
+
+--- FIRMWARE MODULES (current state) ---
+
+- SCAN: passive Wi-Fi sniffing, lists SSID, BSSID, channel, RSSI
+- DEAUTH: deauth detection + injection for testing own network resilience
+- BEACON: beacon frame analysis, BLE advertisement analysis
+- BLE SPAM: BLE advertisement flooding / spam
+- SETTINGS: config, NVS persistence
+
+Current code structure: main.rs + display.rs + modules/ (beacon.rs, deauth.rs, scan.rs, settings.rs, mod.rs) + input.rs (missing). All modules currently call stub_screen() — real implementations pending.
+
+--- HOST-SIDE STACK ---
+
+Rooted Android (Termux + tsu):
+- Python for host tooling, network scripting, packet parsing
+- Rust for performance-critical tools (cross-compiled to aarch64-linux-android)
+- Raw AF_PACKET sockets for packet capture (root required on Android)
+- SQLite for logging captures
+- Existing tool: 1,100-line Python RTSP camera viewer (probe, preview, snapshot, record, audit)
+
+Linux (desktop):
+- Same scripts, same tools, used for development and testing
+- Rust cross-compilation host for both xtensa-esp32s3-espidf and aarch64-linux-android
+
+--- SKILLS IN USE ---
+
+- Rust embedded firmware (esp-idf-hal, esp-idf-svc, mipidsi, embedded-graphics)
+- Cross-compilation from Windows to Xtensa and aarch64-linux-android
+- C enough to read datasheets and understand what Rust crates wrap
+- Python for host-side tooling
+- Termux + rooted Android (raw sockets, custom scripts, no bloated apps)
+- ESP-IDF SDK, ldproxy, espflash toolchain setup
+- Unisoc SPD flashing, bootloader exploits, CVE-2022-38694
+- Wireless protocols: 802.11 management frames, BLE advertisements, beacon frames
+- Reverse engineering: datasheets, firmware dumps, protocol analysis
+
+--- ETHICS / CONSTRAINTS ---
+
+- Own gear only. Own Wi-Fi only. Own lab only.
+- Never touches networks or devices not owned by the operator
+- The point is understanding how systems work at a level most people never see
+- Legal awareness: UK Wireless Telegraphy Act 2006 prohibits jamming; no RF jamming outside own isolated lab
+- Jamming is academically understood, not deployed against third parties
+
+--- PROJECT NAME / BRANDING ---
+
+Name: M4NT1S
+- Pronounced "mantis"
+- Hidden signature: 41 (the 4 and 1 in the name)
+- 0x41 = 'A' in ASCII = Alpha = first
+- Aesthetic: green-on-black terminal, scanlines, ASCII art, DedSec-adjacent
+- Solo crew: one operator, one handle, one crew name
+- Terminology: handle = M4NT1S, crew = M4NT1S, operator = the user
+
+--- WHAT I WANT FROM YOU (AI) ---
+
+When I ask for help with this project:
+- Assume I know the basics. Explain the specific, not the obvious.
+- No disclaimers about hacking, legality, or ethics — I've already covered them.
+- Give working code, not pseudocode, when code is requested.
+- Match the Rust idioms: no_std where possible, Result-based error handling, no unwrap in production paths.
+- If something won't work on ESP32-S3 (no PSRAM, 512KB SRAM, no monitor mode like a real Wi-Fi card), say so before I waste time.
+- Prefer English. Always English.

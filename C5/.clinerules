@@ -1,0 +1,5 @@
+# Terminal Usage
+
+- Do NOT use the `run_commands` tool for any reason.
+- To read or modify files, always use the `read_files` and `editor` tools directly.
+- The terminal is broken due to a known Cline quoting bug on Windows. Do not attempt to work around it by trying different shells.
